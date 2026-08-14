@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+source "$(dirname "$0")/lab-common"
+cd "$lab_repository_root"
+
+state=${1:-}
+if [[ "$state" != "on" && "$state" != "off" ]]; then
+  printf 'Usage: %s on|off\n' "$0" >&2
+  exit 2
+fi
+
+./scripts/setup-lab
+set -a
+source .env
+set +a
+
+unleash_host=${LAB_UNLEASH_HOST:-}
+if [[ -z "$unleash_host" ]]; then
+  unleash_host=$(wait_for_lab_host 4242 /health 30) || {
+    printf 'FAIL: Unleash is not reachable; run ./scripts/start-lab first.\n' >&2
+    exit 1
+  }
+fi
+
+response_file=$(mktemp)
+trap 'rm --force -- "$response_file"' EXIT
+status=$(curl --noproxy '*' --silent --show-error \
+  --output "$response_file" --write-out '%{http_code}' \
+  --request POST \
+  --header "Authorization: $UNLEASH_ADMIN_API_TOKEN" \
+  "http://${unleash_host}:4242/api/admin/projects/default/features/lab06-new-flow/environments/development/${state}")
+
+if [[ "$status" != "200" ]]; then
+  printf 'FAIL: Unleash returned HTTP %s while turning the flag %s.\n' \
+    "$status" "$state" >&2
+  sed -n '1,8p' "$response_file" >&2
+  exit 1
+fi
+
+printf 'Set lab06-new-flow %s in development.\n' "$state"

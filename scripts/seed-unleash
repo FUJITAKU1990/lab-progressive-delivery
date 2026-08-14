@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+source "$(dirname "$0")/lab-common"
+cd "$lab_repository_root"
+
+./scripts/setup-lab
+set -a
+source .env
+set +a
+
+unleash_host=$(wait_for_lab_host 4242 /health 60) || {
+  printf 'FAIL: Unleash did not become reachable within 60 seconds.\n' >&2
+  exit 1
+}
+base_url="http://${unleash_host}:4242"
+response_file=$(mktemp)
+trap 'rm --force -- "$response_file"' EXIT
+
+status=$(curl --noproxy '*' --silent --show-error \
+  --output "$response_file" --write-out '%{http_code}' \
+  --header "Authorization: $UNLEASH_ADMIN_API_TOKEN" \
+  "$base_url/api/admin/projects/default/features/lab06-new-flow")
+
+if [[ "$status" == "404" ]]; then
+  status=$(curl --noproxy '*' --silent --show-error \
+    --output "$response_file" --write-out '%{http_code}' \
+    --request POST \
+    --header "Authorization: $UNLEASH_ADMIN_API_TOKEN" \
+    --header 'Content-Type: application/json' \
+    --data '{"name":"lab06-new-flow","type":"release","description":"Controls the Lab 6 canary checkout flow"}' \
+    "$base_url/api/admin/projects/default/features")
+  if [[ "$status" != "200" && "$status" != "201" ]]; then
+    printf 'FAIL: Unleash returned HTTP %s while creating the lab flag.\n' "$status" >&2
+    sed -n '1,8p' "$response_file" >&2
+    exit 1
+  fi
+elif [[ "$status" != "200" ]]; then
+  printf 'FAIL: Unleash returned HTTP %s while reading the lab flag.\n' "$status" >&2
+  sed -n '1,8p' "$response_file" >&2
+  exit 1
+fi
+
+status=$(curl --noproxy '*' --silent --show-error \
+  --output "$response_file" --write-out '%{http_code}' \
+  --header "Authorization: $UNLEASH_ADMIN_API_TOKEN" \
+  "$base_url/api/admin/projects/default/features/lab06-new-flow/environments/development")
+if [[ "$status" != "200" ]]; then
+  printf 'FAIL: Unleash returned HTTP %s while reading the development flag configuration.\n' \
+    "$status" >&2
+  exit 1
+fi
+
+strategy_count=$(node - "$response_file" <<'NODE'
+"use strict";
+
+const fs = require("node:fs");
+const value = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+process.stdout.write(String(Array.isArray(value.strategies) ? value.strategies.length : 0));
+NODE
+)
+
+if [[ "$strategy_count" == "0" ]]; then
+  status=$(curl --noproxy '*' --silent --show-error \
+    --output "$response_file" --write-out '%{http_code}' \
+    --request POST \
+    --header "Authorization: $UNLEASH_ADMIN_API_TOKEN" \
+    --header 'Content-Type: application/json' \
+    --data '{"name":"default"}' \
+    "$base_url/api/admin/projects/default/features/lab06-new-flow/environments/development/strategies")
+  if [[ "$status" != "200" && "$status" != "201" ]]; then
+    printf 'FAIL: Unleash returned HTTP %s while adding the default strategy.\n' \
+      "$status" >&2
+    sed -n '1,8p' "$response_file" >&2
+    exit 1
+  fi
+fi
+
+LAB_UNLEASH_HOST=$unleash_host ./scripts/flag-control off >/dev/null
+printf 'Seeded lab06-new-flow in development and left it disabled.\n'

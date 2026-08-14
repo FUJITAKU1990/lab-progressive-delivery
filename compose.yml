@@ -1,0 +1,121 @@
+name: lab06
+
+services:
+  postgres:
+    image: postgres:17.10-alpine3.23@sha256:8189a1f6e40904781fc9e2612687877791d21679866db58b1de996b31fc312e4
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: unleash
+      POSTGRES_USER: unleash
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready --username unleash --dbname unleash]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+      start_period: 2s
+
+  unleash:
+    image: unleashorg/unleash-server:8.1.0@sha256:16f3ffb914880e7d0f23629a0c1b77aebea3aa619b0305f76eb50b3fb75998a9
+    init: true
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "4242:4242"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:4242/health').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))
+      interval: 1s
+      timeout: 3s
+      retries: 60
+      start_period: 5s
+
+  stable:
+    build:
+      context: .
+    init: true
+    restart: unless-stopped
+    environment:
+      APP_VERSION: stable
+    ports:
+      - "3000:3000"
+    volumes:
+      - "${LAB06_SOURCE_ROOT}/src:/app/src:ro"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/health').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+
+  canary:
+    build:
+      context: .
+    init: true
+    restart: unless-stopped
+    env_file:
+      - .env.lab
+    environment:
+      APP_VERSION: canary
+    depends_on:
+      unleash:
+        condition: service_healthy
+    ports:
+      - "3001:3000"
+    volumes:
+      - "${LAB06_SOURCE_ROOT}/src:/app/src:ro"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/health').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+
+  traefik:
+    image: traefik:v3.7.6@sha256:21a3d83696379bac6434bb32e1dde0aff0e84ef2abd053ed3db87d3f45e749b2
+    restart: unless-stopped
+    command:
+      - --entryPoints.web.address=:8080
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
+      - --ping=true
+      - --ping.entryPoint=web
+      - --global.checkNewVersion=false
+      - --global.sendAnonymousUsage=false
+      - --log.level=INFO
+    depends_on:
+      stable:
+        condition: service_healthy
+      canary:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      - "${LAB06_SOURCE_ROOT}/lab06:/etc/traefik/dynamic:ro"
+    healthcheck:
+      test: [CMD, traefik, healthcheck, --ping]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+
+volumes:
+  postgres-data:

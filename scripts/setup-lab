@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+source "$(dirname "$0")/lab-common"
+cd "$lab_repository_root"
+
+random_secret() {
+  node -e 'process.stdout.write(require("node:crypto").randomBytes(24).toString("hex"))'
+}
+
+docker_source_root=$lab_repository_root
+if inspect_mounts=$(docker inspect "$(hostname)" --format '{{json .Mounts}}' 2>/dev/null); then
+  resolved_source=$(node -e '
+  const repositoryRoot = process.argv[1];
+  const mounts = JSON.parse(process.argv[2])
+    .filter(mount =>
+      repositoryRoot === mount.Destination ||
+      repositoryRoot.startsWith(`${mount.Destination}/`),
+    )
+    .sort((left, right) => right.Destination.length - left.Destination.length);
+  if (mounts.length > 0) {
+    const mount = mounts[0];
+    process.stdout.write(mount.Source + repositoryRoot.slice(mount.Destination.length));
+  }
+' "$lab_repository_root" "$inspect_mounts")
+  if [[ -n "$resolved_source" ]]; then
+    docker_source_root=$resolved_source
+  fi
+fi
+
+if [[ ! -f .env ]]; then
+  database_password="lab06_$(random_secret)"
+  admin_password="lab06_$(random_secret)"
+  admin_token="*:*.$(random_secret)"
+  client_token="default:development.$(random_secret)"
+
+  {
+    printf 'POSTGRES_PASSWORD=%s\n' "$database_password"
+    printf 'DATABASE_HOST=postgres\n'
+    printf 'DATABASE_NAME=unleash\n'
+    printf 'DATABASE_USERNAME=unleash\n'
+    printf 'DATABASE_PASSWORD=%s\n' "$database_password"
+    printf 'DATABASE_SSL=false\n'
+    printf 'CHECK_VERSION=false\n'
+    printf 'LOG_LEVEL=warn\n'
+    printf 'UNLEASH_DEFAULT_ADMIN_USERNAME=admin\n'
+    printf 'UNLEASH_DEFAULT_ADMIN_PASSWORD=%s\n' "$admin_password"
+    printf 'UNLEASH_ADMIN_API_TOKEN=%s\n' "$admin_token"
+    printf 'INIT_ADMIN_API_TOKENS=%s\n' "$admin_token"
+    printf 'INIT_CLIENT_API_TOKENS=%s\n' "$client_token"
+    printf "LAB06_SOURCE_ROOT='%s'\n" "${docker_source_root//\'/\'\\\'\'}"
+  } > .env
+  chmod 600 .env
+fi
+
+current_source_root=$(sed -n 's/^LAB06_SOURCE_ROOT=//p' .env | tail -n 1)
+current_source_root=${current_source_root#\'}
+current_source_root=${current_source_root%\'}
+if [[ "$current_source_root" != "$docker_source_root" ]]; then
+  temporary_env=$(mktemp)
+  grep -v '^LAB06_SOURCE_ROOT=' .env > "$temporary_env" || true
+  printf "LAB06_SOURCE_ROOT='%s'\n" "${docker_source_root//\'/\'\\\'\'}" >> "$temporary_env"
+  chmod 600 "$temporary_env"
+  mv "$temporary_env" .env
+fi
+
+if [[ ! -f .env.lab ]]; then
+  set -a
+  source .env
+  set +a
+
+  if [[ -z "${INIT_CLIENT_API_TOKENS:-}" ]]; then
+    printf 'FAIL: .env does not contain INIT_CLIENT_API_TOKENS; run ./scripts/reset-lab.\n' >&2
+    exit 1
+  fi
+
+  {
+    printf 'UNLEASH_URL=http://unleash:4242/api/\n'
+    printf 'UNLEASH_SDK_TOKEN=%s\n' "$INIT_CLIENT_API_TOKENS"
+  } > .env.lab
+  chmod 600 .env.lab
+fi

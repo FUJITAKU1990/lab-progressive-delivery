@@ -1,0 +1,342 @@
+#!/usr/bin/env bash
+
+set -uo pipefail
+
+source "$(dirname "$0")/lab-common"
+cd "$lab_repository_root" || exit 1
+
+failures=0
+stack_attempted=false
+temporary_directory=$(mktemp -d)
+
+cleanup() {
+  if [[ "$stack_attempted" == true ]]; then
+    ./scripts/flag-control off >/dev/null 2>&1 || true
+    docker compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+  fi
+  rm --recursive --force -- "$temporary_directory"
+}
+trap cleanup EXIT
+
+record_failure() {
+  printf 'FAIL: %s\n' "$1" >&2
+  failures=$((failures + 1))
+}
+
+for command in curl docker node npm; do
+  if ! command -v "$command" >/dev/null 2>&1; then
+    record_failure "$command is not available; reopen this repository in its devcontainer"
+  fi
+done
+
+if ! docker compose version >/dev/null 2>&1; then
+  record_failure "Docker Compose is not available; reopen this repository in its devcontainer"
+fi
+
+if [[ ! -d node_modules/yaml ]]; then
+  record_failure "Node dependencies are not installed; run npm ci"
+fi
+
+if ((failures > 0)); then
+  printf '\nLab check stopped because required tools are unavailable.\n' >&2
+  exit 1
+fi
+
+flag_source_valid=false
+if node - <<'NODE'
+"use strict";
+
+const Module = require("node:module");
+const path = require("node:path");
+
+const calls = {
+  client: 0,
+  evaluations: [],
+  providers: [],
+  registrations: [],
+};
+const fakeClient = {
+  async getBooleanValue(...args) {
+    calls.evaluations.push(args);
+    return true;
+  },
+};
+const fakeOpenFeature = {
+  getClient() {
+    calls.client += 1;
+    return fakeClient;
+  },
+  async setProviderAndWait(provider) {
+    calls.registrations.push(provider);
+  },
+  async close() {},
+};
+class FakeUnleashProvider {
+  constructor(config) {
+    this.config = config;
+    calls.providers.push(this);
+  }
+}
+
+const originalLoad = Module._load;
+Module._load = function load(request, parent, isMain) {
+  if (request === "@openfeature/server-sdk") {
+    return { OpenFeature: fakeOpenFeature };
+  }
+  if (request === "@unleash/openfeature-node-provider") {
+    return { UnleashProvider: FakeUnleashProvider };
+  }
+  return originalLoad.call(this, request, parent, isMain);
+};
+
+process.env.UNLEASH_URL = "http://unleash.test/api/";
+process.env.UNLEASH_SDK_TOKEN = "default:development.test-token";
+
+(async () => {
+  try {
+    const flags = require(path.resolve("src/flag.js"));
+    for (const name of ["initializeFlags", "getNewFlow"]) {
+      if (typeof flags[name] !== "function") {
+        throw new Error(`export an async ${name} function`);
+      }
+    }
+
+    await flags.initializeFlags();
+    if (calls.providers.length !== 1) {
+      throw new Error("construct exactly one UnleashProvider during startup");
+    }
+    if (
+      calls.registrations.length !== 1 ||
+      calls.registrations[0] !== calls.providers[0]
+    ) {
+      throw new Error("register the constructed provider with setProviderAndWait");
+    }
+
+    const config = calls.providers[0].config;
+    if (config?.url !== process.env.UNLEASH_URL) {
+      throw new Error("configure the provider from UNLEASH_URL");
+    }
+    if (config?.customHeaders?.Authorization !== process.env.UNLEASH_SDK_TOKEN) {
+      throw new Error("send UNLEASH_SDK_TOKEN as the provider Authorization header");
+    }
+
+    const providerCountBeforeEvaluation = calls.providers.length;
+    const first = await flags.getNewFlow();
+    const second = await flags.getNewFlow();
+    if (first !== true || second !== true) {
+      throw new Error("return the OpenFeature boolean evaluation result");
+    }
+    if (calls.providers.length !== providerCountBeforeEvaluation) {
+      throw new Error("do not construct a provider in the request-time evaluation path");
+    }
+    if (calls.evaluations.length !== 2) {
+      throw new Error("evaluate the flag once per getNewFlow call");
+    }
+    for (const args of calls.evaluations) {
+      if (args.length < 2 || args[0] !== "lab06-new-flow" || args[1] !== false) {
+        throw new Error("evaluate lab06-new-flow as a boolean with default false");
+      }
+    }
+  } catch (error) {
+    console.error(error.message);
+    process.exit(1);
+  } finally {
+    Module._load = originalLoad;
+  }
+})();
+NODE
+then
+  flag_source_valid=true
+else
+  record_failure "src/flag.js does not satisfy the OpenFeature provider and evaluation contract"
+fi
+
+routing_valid=false
+if node - <<'NODE'
+"use strict";
+
+const fs = require("node:fs");
+const YAML = require("yaml");
+
+try {
+  const config = YAML.parse(fs.readFileSync("lab06/traefik.yml", "utf8"));
+  const router = config?.http?.routers?.checkout;
+  const loadBalancer = config?.http?.services?.checkout?.loadBalancer;
+
+  if (!router || router.rule !== "PathPrefix(`/`)" || router.service !== "checkout") {
+    throw new Error("preserve the supplied checkout router, rule, and service");
+  }
+  if (
+    !Array.isArray(router.entryPoints) ||
+    router.entryPoints.length !== 1 ||
+    router.entryPoints[0] !== "web"
+  ) {
+    throw new Error("preserve the supplied web entrypoint");
+  }
+  if (loadBalancer?.strategy !== "wrr") {
+    throw new Error("preserve the weighted round-robin strategy");
+  }
+  if (!Array.isArray(loadBalancer.servers) || loadBalancer.servers.length !== 2) {
+    throw new Error("preserve exactly the two supplied backend servers");
+  }
+
+  const [stable, canary] = loadBalancer.servers;
+  if (stable?.url !== "http://stable:3000" || canary?.url !== "http://canary:3000") {
+    throw new Error("preserve the supplied stable and canary backend URLs in order");
+  }
+  if (stable.weight !== 80 || canary.weight !== 20) {
+    throw new Error("set the stable weight to 80 and the canary weight to 20");
+  }
+} catch (error) {
+  console.error(error.message);
+  process.exit(1);
+}
+NODE
+then
+  routing_valid=true
+else
+  record_failure "lab06/traefik.yml does not satisfy the required 80/20 route contract"
+fi
+
+if [[ "$flag_source_valid" == true && "$routing_valid" == true ]]; then
+  if ! ./scripts/setup-lab; then
+    record_failure "local lab credentials could not be prepared"
+  elif ! docker compose config --quiet; then
+    record_failure "compose.yml or its generated environment files are invalid"
+  else
+    stack_attempted=true
+    docker compose down --volumes --remove-orphans >/dev/null 2>&1 || true
+
+    printf '\nStarting the pinned lab stack...\n'
+    if ! docker compose up --detach --build --wait; then
+      record_failure "the pinned Docker Compose stack did not become healthy"
+    elif ! ./scripts/seed-unleash; then
+      record_failure "the supplied Unleash flag could not be seeded"
+    else
+      canary_host=$(wait_for_lab_host 3001 /health 10 || true)
+      traefik_host=$(wait_for_lab_host 8080 /checkout 10 || true)
+
+      if [[ -z "$canary_host" ]]; then
+        record_failure "the running canary is not reachable from the devcontainer"
+      fi
+      if [[ -z "$traefik_host" ]]; then
+        record_failure "Traefik did not load the supplied checkout route"
+      fi
+
+      response_matches() {
+        local body=$1
+        local expected_version=$2
+        local expected_flag=$3
+        node - "$body" "$expected_version" "$expected_flag" <<'NODE'
+"use strict";
+
+try {
+  const value = JSON.parse(process.argv[2]);
+  const expectedFlag = process.argv[4] === "true";
+  process.exit(
+    value.version === process.argv[3] && value.new_flow === expectedFlag ? 0 : 1,
+  );
+} catch {
+  process.exit(1);
+}
+NODE
+      }
+
+      wait_for_checkout() {
+        local url=$1
+        local expected_version=$2
+        local expected_flag=$3
+        local deadline=$((SECONDS + 20))
+        local body
+
+        while ((SECONDS < deadline)); do
+          body=$(curl --noproxy '*' --fail --silent --max-time 2 "$url" 2>/dev/null || true)
+          if response_matches "$body" "$expected_version" "$expected_flag"; then
+            return 0
+          fi
+          sleep 0.5
+        done
+
+        return 1
+      }
+
+      if [[ -n "$canary_host" ]]; then
+        canary_url="http://${canary_host}:3001/checkout"
+        if ! wait_for_checkout "$canary_url" canary false; then
+          record_failure "the disabled flag did not produce new_flow: false on the canary"
+        fi
+
+        canary_id_before=$(docker compose ps --quiet canary)
+        if ! ./scripts/flag-control on >/dev/null; then
+          record_failure "the checker could not enable lab06-new-flow"
+        elif ! wait_for_checkout "$canary_url" canary true; then
+          record_failure "the running canary did not observe the enabled flag within 20 seconds"
+        else
+          canary_id_after=$(docker compose ps --quiet canary)
+          if [[ -z "$canary_id_before" || "$canary_id_before" != "$canary_id_after" ]]; then
+            record_failure "the canary restarted while the flag state changed"
+          fi
+        fi
+
+        if ! ./scripts/flag-control off >/dev/null; then
+          record_failure "the checker could not disable lab06-new-flow again"
+        elif ! wait_for_checkout "$canary_url" canary false; then
+          record_failure "the running canary did not observe the disabled flag within 20 seconds"
+        fi
+      fi
+
+      if [[ -n "$traefik_host" ]]; then
+        responses_path="$temporary_directory/routing-responses.jsonl"
+        route_failed=false
+        for _ in {1..20}; do
+          if ! curl --noproxy '*' --fail --silent --show-error \
+            "http://${traefik_host}:8080/checkout" >> "$responses_path"; then
+            route_failed=true
+            break
+          fi
+          printf '\n' >> "$responses_path"
+        done
+
+        if [[ "$route_failed" == true ]]; then
+          record_failure "a request through Traefik failed"
+        elif ! node - "$responses_path" <<'NODE'
+"use strict";
+
+const fs = require("node:fs");
+
+try {
+  const responses = fs.readFileSync(process.argv[2], "utf8")
+    .trim()
+    .split(/\r?\n/)
+    .map(line => JSON.parse(line));
+  if (responses.length !== 20) {
+    throw new Error("expected 20 routed responses");
+  }
+  for (const response of responses) {
+    if (!["stable", "canary"].includes(response.version) || response.new_flow !== false) {
+      throw new Error("a backend response had an unexpected shape or flag state");
+    }
+  }
+  const versions = new Set(responses.map(response => response.version));
+  if (!versions.has("stable") || !versions.has("canary")) {
+    throw new Error("the sequential sample did not reach both configured versions");
+  }
+} catch (error) {
+  console.error(error.message);
+  process.exit(1);
+}
+NODE
+        then
+          record_failure "the live Traefik route did not exercise both valid backends"
+        fi
+      fi
+    fi
+  fi
+fi
+
+if ((failures > 0)); then
+  printf '\nLab check found %d problem(s).\n' "$failures" >&2
+  exit 1
+fi
+
+printf '\nPASS: OpenFeature evaluation and the live 80/20 Traefik route satisfy the Lab 6 contract.\n'

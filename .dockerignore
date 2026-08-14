@@ -1,0 +1,6 @@
+.git
+.devcontainer
+.env
+.env.lab
+node_modules
+npm-debug.log*

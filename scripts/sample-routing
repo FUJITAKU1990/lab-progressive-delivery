@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+source "$(dirname "$0")/lab-common"
+cd "$lab_repository_root"
+
+sample_size=${1:-20}
+if [[ ! "$sample_size" =~ ^[1-9][0-9]*$ ]] || ((sample_size > 1000)); then
+  printf 'Usage: %s [request-count from 1 to 1000]\n' "$0" >&2
+  exit 2
+fi
+
+traefik_host=$(wait_for_lab_host 8080 /checkout 10) || {
+  printf 'FAIL: Traefik is not reachable; run ./scripts/start-lab first.\n' >&2
+  exit 1
+}
+
+stable_count=0
+canary_count=0
+for ((request_number = 1; request_number <= sample_size; request_number++)); do
+  body=$(curl --noproxy '*' --fail --silent --show-error \
+    "http://${traefik_host}:8080/checkout")
+  version=$(node -e '
+    try {
+      const value = JSON.parse(process.argv[1]);
+      if (!["stable", "canary"].includes(value.version) ||
+          typeof value.new_flow !== "boolean") process.exit(1);
+      process.stdout.write(value.version);
+    } catch { process.exit(1); }
+  ' "$body") || {
+    printf 'FAIL: request %d returned an invalid response: %s\n' \
+      "$request_number" "$body" >&2
+    exit 1
+  }
+
+  if [[ "$version" == "stable" ]]; then
+    stable_count=$((stable_count + 1))
+  else
+    canary_count=$((canary_count + 1))
+  fi
+done
+
+printf 'Sampled %d sequential requests through Traefik.\n' "$sample_size"
+printf '  stable: %d\n' "$stable_count"
+printf '  canary: %d\n' "$canary_count"

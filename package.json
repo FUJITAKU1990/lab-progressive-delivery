@@ -1,0 +1,22 @@
+{
+  "name": "lab-progressive-delivery",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A small service for practicing OpenFeature, Unleash, and Traefik weighted routing",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "start:watch": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "@openfeature/server-sdk": "1.23.0",
+    "@unleash/openfeature-node-provider": "file:vendor/unleash-openfeature-node-provider",
+    "unleash-client": "6.12.1"
+  },
+  "devDependencies": {
+    "yaml": "2.9.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
