@@ -12,6 +12,6 @@ http:
         strategy: wrr
         servers:
           - url: http://stable:3000
-            weight: 100
+            weight: 80
           - url: http://canary:3000
-            weight: 0
+            weight: 20

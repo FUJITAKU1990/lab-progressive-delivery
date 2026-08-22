@@ -1,4 +1,4 @@
-# Feature Flags and Weighted Routing Lab
+# Feature Flags Lab
 
 This repository contains the starter services and deterministic tooling for
 Lab 6. Open it in the provided devcontainer and follow the tasks on the course
@@ -29,8 +29,8 @@ After changing `src/flag.js`, restart the canary so it loads the new code:
 docker compose restart canary
 ```
 
-Traefik watches `lab06/traefik.yml` and reloads valid changes automatically.
-Sample the currently configured route with:
+The supplied Traefik route exposes both versions so you can observe which
+requests reach the flag-aware canary. Sample it with:
 
 ```console
 ./scripts/sample-routing 20
@@ -40,6 +40,5 @@ If the stack is stopped, run `./scripts/start-lab`. To discard all local state,
 generate new local credentials, and restore the supplied disabled flag, run
 `./scripts/reset-lab`.
 
-The only student-owned deliverables are `src/flag.js` and
-`lab06/traefik.yml`. Do not commit `.env`, `.env.lab`, or generated service
-data.
+The only student-owned deliverable is `src/flag.js`.
+Do not commit `.env`, `.env.lab`, or generated service data.

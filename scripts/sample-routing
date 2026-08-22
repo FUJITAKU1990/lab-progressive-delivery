@@ -18,29 +18,40 @@ traefik_host=$(wait_for_lab_host 8080 /checkout 10) || {
 
 stable_count=0
 canary_count=0
+stable_new_flow_count=0
+canary_new_flow_count=0
 for ((request_number = 1; request_number <= sample_size; request_number++)); do
   body=$(curl --noproxy '*' --fail --silent --show-error \
     "http://${traefik_host}:8080/checkout")
-  version=$(node -e '
+  result=$(node -e '
     try {
       const value = JSON.parse(process.argv[1]);
       if (!["stable", "canary"].includes(value.version) ||
           typeof value.new_flow !== "boolean") process.exit(1);
-      process.stdout.write(value.version);
+      process.stdout.write(`${value.version} ${value.new_flow}`);
     } catch { process.exit(1); }
   ' "$body") || {
     printf 'FAIL: request %d returned an invalid response: %s\n' \
       "$request_number" "$body" >&2
     exit 1
   }
+  read -r version new_flow <<< "$result"
 
   if [[ "$version" == "stable" ]]; then
     stable_count=$((stable_count + 1))
+    if [[ "$new_flow" == "true" ]]; then
+      stable_new_flow_count=$((stable_new_flow_count + 1))
+    fi
   else
     canary_count=$((canary_count + 1))
+    if [[ "$new_flow" == "true" ]]; then
+      canary_new_flow_count=$((canary_new_flow_count + 1))
+    fi
   fi
 done
 
 printf 'Sampled %d sequential requests through Traefik.\n' "$sample_size"
-printf '  stable: %d\n' "$stable_count"
-printf '  canary: %d\n' "$canary_count"
+printf '  stable: %d (%d with new_flow=true)\n' \
+  "$stable_count" "$stable_new_flow_count"
+printf '  canary: %d (%d with new_flow=true)\n' \
+  "$canary_count" "$canary_new_flow_count"

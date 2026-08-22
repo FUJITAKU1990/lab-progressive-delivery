@@ -2,7 +2,7 @@
   "name": "lab-progressive-delivery",
   "version": "1.0.0",
   "private": true,
-  "description": "A small service for practicing OpenFeature, Unleash, and Traefik weighted routing",
+  "description": "A small service for practicing feature flags with OpenFeature and Unleash",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",

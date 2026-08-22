@@ -1,5 +1,5 @@
 {
-  "name": "Feature Flags and Weighted Routing Lab",
+  "name": "Feature Flags with OpenFeature and Unleash Lab",
   "build": {
     "dockerfile": "Dockerfile"
   },
